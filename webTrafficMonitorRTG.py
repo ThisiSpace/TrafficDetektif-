@@ -52,10 +52,17 @@ def initialize_firebase():
     return db.reference('/traffic_status')
 
 @st.cache_data(ttl=1) # Data di-cache selama 1 detik
-def get_realtime_status(ref):
+# def get_realtime_status(ref):
+#     """Mengambil status real-time terbaru dari Firebase."""
+#     if ref:
+#         return ref.get()
+#     return None
+def get_realtime_status(): # <--- TIDAK ADA ARGUMEN
     """Mengambil status real-time terbaru dari Firebase."""
-    if ref:
-        return ref.get()
+    global firebase_ref # Gunakan variabel global
+    if firebase_ref:
+        # Panggil metode get() langsung dari referensi global
+        return firebase_ref.get() 
     return None
 
 # --- INI DILAKUKAN SEKALI DI AWAL ---
@@ -106,7 +113,7 @@ while True:
         continue
 
     # Ambil data terbaru dari Firebase (Cached selama 1 detik)
-    status_data = get_realtime_status(firebase_ref)
+    status_data = get_realtime_status()
     
     if status_data:
         # Perbarui status, metrik, dan grafik real-time
