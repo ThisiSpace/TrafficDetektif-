@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import time
-import os
+from collections import deque # Digunakan untuk menyimpan data grafik real-time
+import firebase_admin
+from firebase_admin import credentials, db
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
@@ -14,9 +16,51 @@ st.set_page_config(
 st.title("🚦 Sistem Monitoring Kepadatan Lalu Lintas")
 st.markdown("---")
 
-# Nama file CSV (Harus SAMA PERSIS dengan di program deteksi)
-REALTIME_GRAPH_FILE = "realtime_graph_data.csv"
-CSV_FILE = "laporan_kepadatan_multi.csv"
+# --- KONFIGURASI FIREBASE ---
+# Buffer dalam memori untuk menampung 100 data count terakhir untuk grafik real-time
+MAX_RT_POINTS = 100
+realtime_data_buffer = {
+    "Lajur Kiri": deque(maxlen=MAX_RT_POINTS),
+    "Lajur Kanan": deque(maxlen=MAX_RT_POINTS)
+}
+LAJUR_KEYS = ["Lajur Kiri", "Lajur Kanan"]
+
+# Variabel global untuk referensi Firebase
+firebase_ref = None
+
+# --- FUNGSI FIREBASE (Singletons/Cache) ---
+
+def initialize_firebase():
+    """Menginisialisasi Firebase Admin SDK menggunakan Streamlit Secrets."""
+    # Mencegah error 'The default Firebase app already exists'
+    if not firebase_admin._apps:
+        try:
+            # Menggunakan st.secrets untuk membuat credential
+            cred_dict = dict(st.secrets["firebase"])
+            # Inisialisasi dari dictionary secrets
+            cred = credentials.Certificate(cred_dict) 
+            
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': st.secrets["firebase"]["database_url"]
+            })
+            print("[FIREBASE] Inisialisasi Berhasil.")
+        except Exception as e:
+            st.error(f"Gagal inisialisasi Firebase. Pastikan file secrets.toml sudah benar. Error: {e}")
+            return None
+    
+    # Mengambil referensi dan mengembalikannya
+    return db.reference('/traffic_status')
+
+@st.cache_data(ttl=1) # Data di-cache selama 1 detik
+def get_realtime_status(ref):
+    """Mengambil status real-time terbaru dari Firebase."""
+    if ref:
+        return ref.get()
+    return None
+
+# --- INI DILAKUKAN SEKALI DI AWAL ---
+firebase_ref = initialize_firebase()
+firebase_status_ok = (firebase_ref is not None)
 
 # Fungsi Helper untuk memberi warna status
 def get_status_color(status):
@@ -28,140 +72,114 @@ def get_status_color(status):
 
 # --- BAGIAN TAMPILAN DASHBOARD PERMANEN ---
 
-# Placeholder untuk Konten Utama (Status, Metrik, dan Grafik Historis)
-# Logika ini akan diupdate lebih jarang (2 detik)
+# Placeholder untuk Konten Utama (Status, Metrik)
 status_metric_placeholder = st.empty() 
 
 # Kontainer untuk Grafik Real-time (Frame-by-Frame)
-# Logika ini akan diupdate lebih sering (1 detik)
 st.markdown("---")
 st.subheader("🚀 Grafik Kepadatan Real-Time (Frame-by-Frame)")
 
-# Kontainer untuk grafik real-time
 col_rt_kiri, col_rt_kanan = st.columns(2)
 with col_rt_kiri:
     st.markdown("#### Lajur Kiri Real-Time")
-    rt_chart_kiri = st.empty() # Placeholder untuk grafik cepat
+    rt_chart_kiri = st.empty() 
 with col_rt_kanan:
     st.markdown("#### Lajur Kanan Real-Time")
-    rt_chart_kanan = st.empty() # Placeholder untuk grafik cepat
+    rt_chart_kanan = st.empty() 
+
+# Kontainer untuk Grafik Historis (Hapus ini jika Anda tidak lagi menyimpan log historis terpisah)
+# st.markdown("---")
+# st.subheader("📊 Grafik Historis (Tren Jangka Panjang)")
+# historical_chart_placeholder = st.empty()
+
 
 # --- LOOP UTAMA ---
 
 # Variabel untuk mengontrol kecepatan update (Polling)
 last_historical_update = time.time()
-HISTORICAL_UPDATE_INTERVAL = 2 # Update status/metrik/historis setiap 2 detik
+HISTORICAL_UPDATE_INTERVAL = 2 # Update status/metrik setiap 2 detik
 
 while True:
     
-    # --- 1. UPDATE GRAFIK REAL-TIME (Cepat: Setiap 1 detik) ---
-    if os.path.exists(REALTIME_GRAPH_FILE):
-        try:
-            # Baca hanya 100 baris terakhir dari file real-time agar cepat
-            # Header asumsi: Lajur, Jumlah Objek (dari modifikasi kode deteksi sebelumnya)
-            df_rt = pd.read_csv(REALTIME_GRAPH_FILE)
-            df_rt_display = df_rt.tail(100) # Hanya tampilkan 100 baris terakhir
-            
-            rt_kiri = df_rt_display[df_rt_display['Lajur'] == 'Lajur Kiri']
-            rt_kanan = df_rt_display[df_rt_display['Lajur'] == 'Lajur Kanan']
-            
-            # Gambar ulang grafik Kiri
-            with rt_chart_kiri:
-                if not rt_kiri.empty:
-                    st.line_chart(rt_kiri['Jumlah Objek'].reset_index(drop=True), height=300) 
-                else:
-                    st.info("Menunggu data frame...")
+    if not firebase_status_ok:
+        time.sleep(5)
+        continue
 
-            # Gambar ulang grafik Kanan
-            with rt_chart_kanan:
-                if not rt_kanan.empty:
-                    st.line_chart(rt_kanan['Jumlah Objek'].reset_index(drop=True), height=300)
-                else:
-                    st.info("Menunggu data frame...")
-                    
-        except pd.errors.EmptyDataError:
-             # File ada tapi kosong (baru di-reset)
-            with rt_chart_kiri: st.info("Menunggu data frame pertama...")
-            with rt_chart_kanan: st.info("Menunggu data frame pertama...")
-        except Exception as e:
-            # st.error(f"Error membaca Realtime CSV: {e}") # Nonaktifkan agar tidak mengganggu tampilan
-            pass # Lanjutkan loop meskipun ada error baca/tulis
-
+    # Ambil data terbaru dari Firebase (Cached selama 1 detik)
+    status_data = get_realtime_status(firebase_ref)
     
-    # --- 2. UPDATE STATUS, METRIK, dan GRAFIK HISTORIS (Lambat: Setiap 2 detik) ---
-    if (time.time() - last_historical_update) >= HISTORICAL_UPDATE_INTERVAL:
+    if status_data:
+        # Perbarui status, metrik, dan grafik real-time
         
-        with status_metric_placeholder.container():
-            # Cek apakah file CSV Historis ada
-            if not os.path.exists(CSV_FILE):
-                st.warning("⏳ Menunggu data historis (CSV_FILE)... Jalankan program deteksi terlebih dahulu.")
-                time.sleep(1) # Jeda singkat jika file utama belum ada
+        # --- 1. UPDATE STATUS, METRIK, dan GRAFIK HISTORIS (Sekali dalam 2 detik) ---
+        if (time.time() - last_historical_update) >= HISTORICAL_UPDATE_INTERVAL:
+            
+            with status_metric_placeholder.container():
                 
-            else:
-                try:
-                    df = pd.read_csv(CSV_FILE)
+                # Buat 2 Kolom untuk Layout (Lajur Kiri & Lajur Kanan)
+                col1, col2 = st.columns(2)
+                
+                for i, nama_lajur in enumerate(LAJUR_KEYS):
                     
-                    # Buat 2 Kolom untuk Layout (Lajur Kiri & Lajur Kanan)
-                    col1, col2 = st.columns(2)
+                    # Ubah nama lajur menjadi format key Firebase (misal: Lajur Kiri -> Lajur_Kiri)
+                    lajur_key = nama_lajur.replace(" ", "_")
                     
-                    # --- LOGIKA TAMPILAN STATUS/METRIK (Kiri) ---
-                    with col1:
-                        st.header("⬅️ Lajur Kiri")
-                        df_kiri = df[df["Lajur"] == "Lajur Kiri"]
+                    if lajur_key in status_data:
+                        data = status_data[lajur_key]
                         
-                        if not df_kiri.empty:
-                            last_kiri = df_kiri.iloc[-1]
-                            status_kiri = last_kiri["Status"]
-                            color_kiri = get_status_color(status_kiri)
+                        count = data.get('count', 0)
+                        speed = data.get('speed', "0.00")
+                        status = data.get('status', "UNKNOWN")
+                        color = get_status_color(status)
+                        
+                        target_col = col1 if i == 0 else col2
+
+                        with target_col:
+                            st.header(f" {nama_lajur}") # Tambahkan emoji jika perlu
                             
-                            st.metric(label="Jumlah Kendaraan", value=f"{last_kiri['Jumlah Objek']} unit")
-                            st.metric(label="Kecepatan Rata-rata", value=f"{last_kiri['Avg Speed']} px/frame")
+                            st.metric(label="Jumlah Kendaraan", value=f"{count} unit")
+                            st.metric(label="Kecepatan Rata-rata", value=f"{speed} px/frame")
                             
                             st.markdown(f"""
-                                <div style="padding:10px; border-radius:5px; background-color:{color_kiri}; color:white; text-align:center;">
-                                    <h2 style="margin:0;">{status_kiri}</h2>
+                                <div style="padding:10px; border-radius:5px; background-color:{color}; color:white; text-align:center;">
+                                    <h2 style="margin:0;">{status}</h2>
                                 </div>
                                 """, unsafe_allow_html=True)
                             
-                            st.subheader("Grafik Historis (Tren)")
-                            # Grafik Historis
-                            st.line_chart(df_kiri.tail(100)[["Jumlah Objek"]].reset_index(drop=True))
-                        else:
-                            st.info("Belum ada data Lajur Kiri")
-
-                    # --- LOGIKA TAMPILAN STATUS/METRIK (Kanan) ---
-                    with col2:
-                        st.header("➡️ Lajur Kanan")
-                        df_kanan = df[df["Lajur"] == "Lajur Kanan"]
-                        
-                        if not df_kanan.empty:
-                            last_kanan = df_kanan.iloc[-1]
-                            status_kanan = last_kanan["Status"]
-                            color_kanan = get_status_color(status_kanan)
+                            # Logika Historis dihilangkan atau diganti jika tidak ada log historis terpisah
+                            st.info("Grafik Historis Memerlukan Log Data Terpisah (Belum Disediakan)")
                             
-                            st.metric(label="Jumlah Kendaraan", value=f"{last_kanan['Jumlah Objek']} unit")
-                            st.metric(label="Kecepatan Rata-rata", value=f"{last_kanan['Avg Speed']} px/frame")
-                            
-                            st.markdown(f"""
-                                <div style="padding:10px; border-radius:5px; background-color:{color_kanan}; color:white; text-align:center;">
-                                    <h2 style="margin:0;">{status_kanan}</h2>
-                                </div>
-                                """, unsafe_allow_html=True)
-                            
-                            st.subheader("Grafik Historis (Tren)")
-                            # Grafik Historis
-                            st.line_chart(df_kanan.tail(100)[["Jumlah Objek"]].reset_index(drop=True))
-                        else:
-                            st.info("Belum ada data Lajur Kanan")
-                            
-                    # Tabel Data Mentah (Opsional, di bawah)
-                    with st.expander("Lihat Data Mentah Historis Terakhir"):
-                        st.dataframe(df.tail(10))
-
-                except Exception as e:
-                    st.error(f"Terjadi kesalahan fatal membaca data historis: {e}")
-
                 last_historical_update = time.time() # Reset timer historis
+                
+        # --- 2. UPDATE GRAFIK REAL-TIME (Cepat: Setiap 0.5 detik) ---
+        
+        # Update buffer dan grafik dalam setiap loop (cepat)
+        for i, nama_lajur in enumerate(LAJUR_KEYS):
+            lajur_key = nama_lajur.replace(" ", "_")
+            
+            if lajur_key in status_data:
+                count = status_data[lajur_key].get('count', 0)
+                
+                # Masukkan data count terbaru ke buffer memori
+                realtime_data_buffer[nama_lajur].append(count)
 
-    # Jeda pendek, ini mengontrol kecepatan keseluruhan loop, mempengaruhi kecepatan real-time
+                # Siapkan data untuk Line Chart dari buffer
+                df_chart = pd.DataFrame(list(realtime_data_buffer[nama_lajur]), columns=["Jumlah Objek"])
+                
+                # Gambar ulang grafik
+                target_chart = rt_chart_kiri if i == 0 else rt_chart_kanan
+                
+                with target_chart:
+                    if not df_chart.empty:
+                        # Streamlit akan me-render indeks sebagai sumbu X (Frame-by-Frame)
+                        st.line_chart(df_chart, height=300) 
+                    else:
+                        st.info("Menunggu data frame...")
+                        
+    else:
+        # Jika status_data kosong (misal program deteksi belum jalan)
+        with status_metric_placeholder.container():
+            st.warning("Menunggu data dari Firebase... Pastikan program deteksi lokal sedang berjalan.")
+            
+    # Jeda pendek, mengontrol kecepatan keseluruhan loop
     time.sleep(0.5)
