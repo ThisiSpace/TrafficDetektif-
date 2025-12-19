@@ -154,7 +154,7 @@ while True:
                                 """, unsafe_allow_html=True)
                             
                             # Logika Historis dihilangkan atau diganti jika tidak ada log historis terpisah
-                            st.info("Grafik Historis Memerlukan Log Data Terpisah (Belum Disediakan)")
+                            # st.info("Grafik Historis Memerlukan Log Data Terpisah (Belum Disediakan)")
                             
                 last_historical_update = time.time() # Reset timer historis
                 
@@ -190,3 +190,4 @@ while True:
             
     # Jeda pendek, mengontrol kecepatan keseluruhan loop
     time.sleep(0.5)
+
